@@ -2,7 +2,7 @@
 # Simple bash stress test using curl
 
 LB_URL="demo-alb-1297652538.us-east-1.elb.amazonaws.com"
-DURATION=600      # 10 minutes
+DURATION=20      # 10 minutes
 CONCURRENT=50
 
 echo "Starting stress test..."
