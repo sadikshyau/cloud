@@ -1,0 +1,75 @@
+name: Deploy to ASG
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      
+      - name: Get healthy instances
+        id: instances
+        run: |
+          IDS=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names demo-asg \
+            --query 'AutoScalingGroups[0].Instances[?HealthStatus==`Healthy`].InstanceId' \
+            --output text)
+          echo "ids=$IDS" >> $GITHUB_OUTPUT
+      
+      - name: Get instance IPs
+        id: ips
+        run: |
+          IPS=""
+          for id in ${{ steps.instances.outputs.ids }}; do
+            IP=$(aws ec2 describe-instances --instance-ids $id \
+              --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+            IPS="$IPS $IP"
+          done
+          echo "list=$IPS" >> $GITHUB_OUTPUT
+      
+      - name: Setup SSH
+        run: |
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > key.pem
+          chmod 600 key.pem
+      
+      - name: Deploy to instances
+        run: |
+          for ip in ${{ steps.ips.outputs.list }}; do
+            echo "Deploying to $ip"
+            
+            scp -i key.pem -o StrictHostKeyChecking=no \
+              index.html ubuntu@$ip:/tmp/index.html
+            
+            ssh -i key.pem -o StrictHostKeyChecking=no ubuntu@$ip << 'EOF'
+              TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+              ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+              AZ=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+              PRIV=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+              PUB=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+              
+              sed -e "s/{{INSTANCE_ID}}/$ID/g" \
+                  -e "s/{{AVAILABILITY_ZONE}}/$AZ/g" \
+                  -e "s/{{LOCAL_IPV4}}/$PRIV/g" \
+                  -e "s/{{PUBLIC_IPV4}}/$PUB/g" \
+                  /tmp/index.html | sudo tee /var/www/html/index.html
+              
+              sudo systemctl restart nginx
+          EOF
+          done
+      
+      - name: Cleanup
+        if: always()
+        run: rm -f key.pem
